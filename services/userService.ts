@@ -277,8 +277,6 @@ export const exportAllUserData = async (): Promise<UserProfileData[] | null> => 
  * Initializes/repairs the admin account.
  */
 export const initializeAdminAccount = async () => {
-    console.log("Checking/repairing admin account profile...");
-
     const adminEmail = 'izzat.enquiry@gmail.com';
     
     const { data: adminUser, error: findError } = await supabase
@@ -310,8 +308,6 @@ export const initializeAdminAccount = async () => {
 
     if (upsertError) {
         console.error('Failed to upsert admin profile:', getErrorMessage(upsertError));
-    } else {
-        console.log('Admin profile successfully configured in database.');
     }
 };
 
