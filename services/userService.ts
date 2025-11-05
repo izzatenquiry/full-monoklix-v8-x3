@@ -706,25 +706,37 @@ export const incrementImageUsage = async (userId: string): Promise<{ success: tr
         
         const { data, error } = await supabase.from('trial_user').select('*').eq('id', trialUserId).single();
         if (error || !data) return { success: false, message: "Trial user not found." };
-        // FIX: Called the correct mapping function 'mapTrialProfileToUser' for trial user data.
         return { success: true, user: mapTrialProfileToUser(data as TrialUserProfileData) };
     }
     try {
+        // Step 1: Get current count
         const { data: currentData, error: fetchError } = await supabase
             .from('users')
             .select('total_image')
             .eq('id', userId)
             .single();
         if (fetchError) throw fetchError;
+        
+        // Step 2: Update the count
         const currentCount = Number(currentData?.total_image || 0);
-        const { data: updatedData, error: updateError } = await supabase
+        const { error: updateError } = await supabase
             .from('users')
             .update({ total_image: currentCount + 1 })
-            .eq('id', userId)
-            .select()
-            .single();
+            .eq('id', userId);
         if (updateError) throw updateError;
-        return { success: true, user: mapProfileToUser(updatedData as UserProfileData) };
+        
+        // Step 3: Re-fetch the complete user profile to ensure freshness
+        const { data: refreshedUserData, error: refreshError } = await supabase
+            .from('users')
+            .select('*')
+            .eq('id', userId)
+            .single();
+
+        if (refreshError || !refreshedUserData) {
+            throw refreshError || new Error("Failed to re-fetch user profile after incrementing image usage.");
+        }
+
+        return { success: true, user: mapProfileToUser(refreshedUserData as UserProfileData) };
     } catch (error) {
         const message = getErrorMessage(error);
         console.error("Failed to increment image usage:", message);
@@ -742,21 +754,34 @@ export const incrementVideoUsage = async (userId: string): Promise<{ success: tr
         return { success: true, user: mapTrialProfileToUser(data as TrialUserProfileData) };
     }
     try {
+        // Step 1: Get current count
         const { data: currentData, error: fetchError } = await supabase
             .from('users')
             .select('total_video')
             .eq('id', userId)
             .single();
         if (fetchError) throw fetchError;
+        
+        // Step 2: Update the count
         const currentCount = Number(currentData?.total_video || 0);
-        const { data: updatedData, error: updateError } = await supabase
+        const { error: updateError } = await supabase
             .from('users')
             .update({ total_video: currentCount + 1 })
-            .eq('id', userId)
-            .select()
-            .single();
+            .eq('id', userId);
         if (updateError) throw updateError;
-        return { success: true, user: mapProfileToUser(updatedData as UserProfileData) };
+        
+        // Step 3: Re-fetch the complete user profile
+        const { data: refreshedUserData, error: refreshError } = await supabase
+            .from('users')
+            .select('*')
+            .eq('id', userId)
+            .single();
+
+        if (refreshError || !refreshedUserData) {
+            throw refreshError || new Error("Failed to re-fetch user profile after incrementing video usage.");
+        }
+
+        return { success: true, user: mapProfileToUser(refreshedUserData as UserProfileData) };
     } catch (error) {
         const message = getErrorMessage(error);
         console.error("Failed to increment video usage:", message);
