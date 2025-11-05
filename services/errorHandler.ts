@@ -70,16 +70,11 @@ export const handleApiError = (error: unknown): string => {
     // --- End Error Code Detection ---
 
 
-    const isVeoError = lowerCaseMessage.includes('veo auth token');
-    if ((errorCode === '403' || errorCode === '401') && isVeoError) {
-        eventBus.dispatch('initiateAutoVeoKeyClaim');
-        return "VEO authorization failed. Please try again or check your API key.";
-    }
-
     const isApiKeyError = (errorCode === '403' || errorCode === '401') || (errorCode === '400' && lowerCaseMessage.includes('api key not valid'));
     if (isApiKeyError) {
-        eventBus.dispatch('initiateAutoApiKeyClaim');
-        return "API Key is invalid or expired. Please try again or check your API key.";
+        // The `personalTokenFailed` event will trigger a notification.
+        // This message is shown in the UI where the error occurred.
+        return "Your connection token is invalid or has failed. Please claim a new token from the Key icon in the header.";
     }
     
     // Return simple, user-friendly messages based on the code
