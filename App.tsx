@@ -350,10 +350,15 @@ const App: React.FC = () => {
 
   // Effect to handle personal token failure
   useEffect(() => {
-    const handlePersonalTokenFailure = () => {
+    const handlePersonalTokenFailure = async () => {
       if (currentUser && currentUser.personalAuthToken) {
-        // Instruct user to manually claim a new token
-        setNotification('Token sambungan anda telah gagal. Sila tuntut token baharu menggunakan ikon Kunci di bahagian atas.');
+        setNotification('Sambungan akaun anda telah dikemas kini secara automatik.');
+        
+        // Clear the bad token from the user's profile
+        const result = await saveUserPersonalAuthToken(currentUser.id, null);
+        if (result.success) {
+          handleUserUpdate(result.user);
+        }
         
         // Hide notification after a delay
         setTimeout(() => setNotification(null), 8000);
@@ -365,7 +370,7 @@ const App: React.FC = () => {
     return () => {
       eventBus.remove('personalTokenFailed', handlePersonalTokenFailure);
     };
-  }, [currentUser]);
+  }, [currentUser, handleUserUpdate]);
 
   // Effect to fetch session data (API keys, tokens) once a user is logged in.
   useEffect(() => {
