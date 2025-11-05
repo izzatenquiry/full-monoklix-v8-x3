@@ -348,21 +348,134 @@ const App: React.FC = () => {
     setSessionChecked(true);
   }, []);
 
-  // Effect to handle personal token failure
+  // Effect for user heartbeat (active status)
+  useEffect(() => {
+      if (currentUser?.id) {
+          // Initial update on login
+          updateUserLastSeen(currentUser.id);
+
+          const heartbeatInterval = setInterval(() => {
+              updateUserLastSeen(currentUser!.id);
+          }, 30000); // Send a heartbeat every 30 seconds
+
+          return () => clearInterval(heartbeatInterval);
+      }
+  }, [currentUser?.id]);
+
+  const assignTokenProcess = useCallback(async (): Promise<{ success: boolean; error: string | null; }> => {
+      if (!currentUser || isAssigningTokenRef.current) {
+          return { success: false, error: "Process is already running or user not available." };
+      }
+      
+      if (currentUser.status === 'trial') {
+          return { success: true, error: null }; // No token needed for trial users
+      }
+      
+      isAssigningTokenRef.current = true;
+      setAssigningStatus('scanning');
+      
+      console.log('Starting auto-assignment process...');
+
+      const tokensJSON = sessionStorage.getItem('veoAuthTokens');
+      if (!tokensJSON) {
+          const errorMsg = "Sistem tidak dapat mencari sebarang token sambungan yang tersedia. Sila hubungi admin.";
+          isAssigningTokenRef.current = false;
+          setAssigningStatus('error');
+          return { success: false, error: errorMsg };
+      }
+      
+      let tokenAssigned = false;
+      let finalError: string | null = "Semua slot sambungan sedang penuh. Sila cuba lagi sebentar lagi atau hubungi admin.";
+
+      try {
+          const sharedTokens: { token: string; createdAt: string }[] = JSON.parse(tokensJSON);
+          setScanProgress({ current: 0, total: sharedTokens.length });
+          
+          // Randomize for load distribution
+          for (let i = sharedTokens.length - 1; i > 0; i--) {
+              const j = Math.floor(Math.random() * (i + 1));
+              [sharedTokens[i], sharedTokens[j]] = [sharedTokens[j], sharedTokens[i]];
+          }
+
+          for (const [index, tokenData] of sharedTokens.entries()) {
+              setScanProgress({ current: index + 1, total: sharedTokens.length });
+              console.log(`[Auto-Assign] Testing shared token... ${tokenData.token.slice(-6)}`);
+              const results = await runComprehensiveTokenTest(tokenData.token);
+              const isImagenOk = results.find(r => r.service === 'Imagen')?.success;
+              const isVeoOk = results.find(r => r.service === 'Veo')?.success;
+
+              if (isImagenOk && isVeoOk) {
+                  console.log(`[Auto-Assign] Found a valid token: ...${tokenData.token.slice(-6)}. Assigning to user.`);
+                  setAssigningStatus('assigning');
+                  const assignResult = await assignPersonalTokenAndIncrementUsage(currentUser.id, tokenData.token);
+
+// FIX: Inverted the conditional check to correctly narrow the discriminated union type for `assignResult`, 
+// resolving a TypeScript error where the 'message' property was not found on the success type.
+                  if (!assignResult.success) {
+                      console.warn(`[Auto-Assign] Could not assign token ...${tokenData.token.slice(-6)}: ${assignResult.message}. Trying next.`);
+                      setAssigningStatus('scanning'); // Go back to scanning
+                      if (assignResult.message === 'DB_SCHEMA_MISSING_COLUMN_personal_auth_token' && currentUser.role === 'admin') {
+                          finalError = "Database schema is outdated.";
+                          alert("Database schema is outdated.\n\nPlease go to your Supabase dashboard and run the following SQL command to add the required column:\n\nALTER TABLE public.users ADD COLUMN personal_auth_token TEXT;");
+                          break;
+                      }
+                  } else {
+                      handleUserUpdate(assignResult.user);
+                      console.log('[Auto-Assign] Successfully assigned personal token.');
+                      tokenAssigned = true;
+                      finalError = null;
+                      setAssigningStatus('success');
+                      break;
+                  }
+              } else {
+                  console.warn(`[Auto-Assign] Token ...${tokenData.token.slice(-6)} failed health check. Marking as expired.`);
+                  // Fire-and-forget call to mark the token as expired
+                  updateTokenStatusToExpired(tokenData.token);
+              }
+          }
+
+          if (!tokenAssigned) {
+              console.log('[Auto-Assign] No valid shared tokens found after testing all available tokens.');
+          }
+
+      } catch (error) {
+          console.error('[Auto-Assign] An error occurred during the token assignment process:', error);
+          finalError = "An unexpected error occurred during assignment. Please try again.";
+      } finally {
+          isAssigningTokenRef.current = false;
+      }
+      
+      if (!tokenAssigned) {
+          setAssigningStatus('error');
+      }
+
+      return { success: tokenAssigned, error: finalError };
+  }, [currentUser, handleUserUpdate]);
+
+  // Effect to handle token failure notification
   useEffect(() => {
     const handlePersonalTokenFailure = async () => {
-      if (currentUser && currentUser.personalAuthToken) {
-        setNotification('Sambungan akaun anda telah dikemas kini secara automatik.');
-        
-        // Clear the bad token from the user's profile
-        const result = await saveUserPersonalAuthToken(currentUser.id, null);
-        if (result.success) {
-          handleUserUpdate(result.user);
-        }
-        
-        // Hide notification after a delay
-        setTimeout(() => setNotification(null), 8000);
+      // Prevent running if already assigning or no user/token
+      if (isAssigningTokenRef.current || !currentUser || !currentUser.personalAuthToken) {
+          return;
       }
+      
+      setNotification('Sambungan anda gagal. Token telah dibuang. Sila dapatkan token baru secara manual di bahagian Settings.');
+      
+      // Clear the bad token from the user's profile first
+      const clearResult = await saveUserPersonalAuthToken(currentUser.id, null);
+// FIX: Inverted conditional check to correctly narrow discriminated union type for `clearResult`, resolving a TypeScript error where the 'message' property was not found on the success type.
+      if (!clearResult.success) {
+        // If clearing fails, there's a bigger DB issue, but we can still clear locally to unblock the user.
+        console.error("Failed to clear the failed token from the database:", clearResult.message);
+        const userWithClearedToken = { ...currentUser, personalAuthToken: null };
+        handleUserUpdate(userWithClearedToken);
+      } else {
+        handleUserUpdate(clearResult.user);
+      }
+      
+      // General notification cleanup
+      setTimeout(() => setNotification(null), 8000);
     };
 
     eventBus.on('personalTokenFailed', handlePersonalTokenFailure);
@@ -437,20 +550,6 @@ const App: React.FC = () => {
     }
   }, [justLoggedIn]);
   
-   // Effect for user heartbeat (active status)
-    useEffect(() => {
-        if (currentUser?.id) {
-            // Initial update on login
-            updateUserLastSeen(currentUser.id);
-
-            const heartbeatInterval = setInterval(() => {
-                updateUserLastSeen(currentUser!.id);
-            }, 30000); // Send a heartbeat every 30 seconds
-
-            return () => clearInterval(heartbeatInterval);
-        }
-    }, [currentUser?.id]);
-
     // Effect for real-time remote logout listener
     useEffect(() => {
         if (!currentUser?.id || currentUser.status === 'trial') return;
@@ -485,94 +584,6 @@ const App: React.FC = () => {
         };
     }, [currentUser?.id, currentUser?.status, handleLogout]);
 
-    const assignTokenProcess = useCallback(async (): Promise<{ success: boolean; error: string | null; }> => {
-        if (!currentUser || isAssigningTokenRef.current) {
-            return { success: false, error: "Process is already running or user not available." };
-        }
-        
-        if (currentUser.status === 'trial') {
-            return { success: true, error: null }; // No token needed for trial users
-        }
-        
-        isAssigningTokenRef.current = true;
-        setAssigningStatus('scanning');
-        
-        console.log('Starting auto-assignment process...');
-
-        const tokensJSON = sessionStorage.getItem('veoAuthTokens');
-        if (!tokensJSON) {
-            const errorMsg = "Sistem tidak dapat mencari sebarang token sambungan yang tersedia. Sila hubungi admin.";
-            isAssigningTokenRef.current = false;
-            setAssigningStatus('error');
-            return { success: false, error: errorMsg };
-        }
-        
-        let tokenAssigned = false;
-        let finalError: string | null = "Semua slot sambungan sedang penuh. Sila cuba lagi sebentar lagi atau hubungi admin.";
-
-        try {
-            const sharedTokens: { token: string; createdAt: string }[] = JSON.parse(tokensJSON);
-            setScanProgress({ current: 0, total: sharedTokens.length });
-            
-            // Randomize for load distribution
-            for (let i = sharedTokens.length - 1; i > 0; i--) {
-                const j = Math.floor(Math.random() * (i + 1));
-                [sharedTokens[i], sharedTokens[j]] = [sharedTokens[j], sharedTokens[i]];
-            }
-
-            for (const [index, tokenData] of sharedTokens.entries()) {
-                setScanProgress({ current: index + 1, total: sharedTokens.length });
-                console.log(`[Auto-Assign] Testing shared token... ${tokenData.token.slice(-6)}`);
-                const results = await runComprehensiveTokenTest(tokenData.token);
-                const isImagenOk = results.find(r => r.service === 'Imagen')?.success;
-                const isVeoOk = results.find(r => r.service === 'Veo')?.success;
-
-                if (isImagenOk && isVeoOk) {
-                    console.log(`[Auto-Assign] Found a valid token: ...${tokenData.token.slice(-6)}. Assigning to user.`);
-                    setAssigningStatus('assigning');
-                    const assignResult = await assignPersonalTokenAndIncrementUsage(currentUser.id, tokenData.token);
-
-                    if (assignResult.success === false) {
-                        console.warn(`[Auto-Assign] Could not assign token ...${tokenData.token.slice(-6)}: ${assignResult.message}. Trying next.`);
-                        setAssigningStatus('scanning'); // Go back to scanning
-                        if (assignResult.message === 'DB_SCHEMA_MISSING_COLUMN_personal_auth_token' && currentUser.role === 'admin') {
-                            finalError = "Database schema is outdated.";
-                            alert("Database schema is outdated.\n\nPlease go to your Supabase dashboard and run the following SQL command to add the required column:\n\nALTER TABLE public.users ADD COLUMN personal_auth_token TEXT;");
-                            break;
-                        }
-                    } else {
-                        handleUserUpdate(assignResult.user);
-                        console.log('[Auto-Assign] Successfully assigned personal token.');
-                        tokenAssigned = true;
-                        finalError = null;
-                        setAssigningStatus('success');
-                        break;
-                    }
-                } else {
-                    console.warn(`[Auto-Assign] Token ...${tokenData.token.slice(-6)} failed health check. Marking as expired.`);
-                    // Fire-and-forget call to mark the token as expired
-                    updateTokenStatusToExpired(tokenData.token);
-                }
-            }
-
-            if (!tokenAssigned) {
-                console.log('[Auto-Assign] No valid shared tokens found after testing all available tokens.');
-            }
-
-        } catch (error) {
-            console.error('[Auto-Assign] An error occurred during the token assignment process:', error);
-            finalError = "An unexpected error occurred during assignment. Please try again.";
-        } finally {
-            isAssigningTokenRef.current = false;
-        }
-        
-        if (!tokenAssigned) {
-            setAssigningStatus('error');
-        }
-
-        return { success: tokenAssigned, error: finalError };
-    }, [currentUser, handleUserUpdate]);
-    
     const retryAssignment = useCallback(async () => {
         setAssigningStatus('scanning');
         setAutoAssignError(null);
